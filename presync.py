@@ -70,11 +70,11 @@ def ensure_bucket_exists(s3_client, bucket_name, region):
 
 def download_file(url, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if not os.path.exists(output_path):
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    total_size = int(response.headers.get("content-length", 0))
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < total_size:
         print(f"Downloading {output_path}")
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        total_size = int(response.headers.get("content-length", 0))
         with (
             open(output_path, "wb") as f,
             tqdm(
@@ -91,6 +91,8 @@ def download_file(url, output_path):
                     bar.update(size)
     else:
         print(f"File {output_path} already exists. Skipping download.")
+
+    response.close()
 
 
 def read_download_list(file_path):
