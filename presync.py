@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "boto3>=1.34.110",
+#     "tqdm>=4.66.0",
+#     "requests>=2.32.3",
+# ]
+# ///
 
 import os
 import sys
 import hashlib
 import boto3
 import requests
-import shutil
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,10 +21,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LOCAL_MODEL_DIR = "./models"
 DOWNLOAD_LIST_FILE = "model_list.txt"
 
+
 def get_unique_suffix():
     session = boto3.Session()
-    sts_client = session.client('sts')
-    account_id = sts_client.get_caller_identity().get('Account')
+    sts_client = session.client("sts")
+    account_id = sts_client.get_caller_identity().get("Account")
     region = session.region_name
 
     print(f"account_id: {account_id}")
@@ -28,25 +36,24 @@ def get_unique_suffix():
         sys.exit(1)
 
     unique_input = f"{account_id}-{region}"
-    unique_hash = hashlib.sha256(unique_input.encode('utf-8')).hexdigest()[:10]
+    unique_hash = hashlib.sha256(unique_input.encode("utf-8")).hexdigest()[:10]
     suffix = unique_hash.lower()
     return suffix, region
+
 
 def ensure_bucket_exists(s3_client, bucket_name, region):
     try:
         s3_client.head_bucket(Bucket=bucket_name)
         print(f"Bucket {bucket_name} already exists.")
     except ClientError as e:
-        error_code = int(e.response['ResponseMetadata']['HTTPStatusCode'])
+        error_code = int(e.response["ResponseMetadata"]["HTTPStatusCode"])
         if error_code == 404:
-            if region == 'us-east-1':
-                s3_client.create_bucket(
-                    Bucket=bucket_name
-                )
+            if region == "us-east-1":
+                s3_client.create_bucket(Bucket=bucket_name)
             else:
                 s3_client.create_bucket(
                     Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': region}
+                    CreateBucketConfiguration={"LocationConstraint": region},
                 )
             print(f"Bucket {bucket_name} created successfully.")
             print(f"Execute now: export MODEL_BUCKET_NAME={bucket_name}")
@@ -60,20 +67,24 @@ def ensure_bucket_exists(s3_client, bucket_name, region):
             print(f"Unexpected error (HTTP {error_code}): {e}")
             sys.exit(1)
 
+
 def download_file(url, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if not os.path.exists(output_path):
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    total_size = int(response.headers.get("content-length", 0))
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < total_size:
         print(f"Downloading {output_path}")
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        total_size = int(response.headers.get('content-length', 0))
-        with open(output_path, 'wb') as f, tqdm(
-            desc=output_path,
-            total=total_size,
-            unit='iB',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar:
+        with (
+            open(output_path, "wb") as f,
+            tqdm(
+                desc=output_path,
+                total=total_size,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+            ) as bar,
+        ):
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     size = f.write(chunk)
@@ -81,16 +92,19 @@ def download_file(url, output_path):
     else:
         print(f"File {output_path} already exists. Skipping download.")
 
+    response.close()
+
+
 def read_download_list(file_path):
     if not os.path.isfile(file_path):
         print(f"Error: {file_path} file not found!")
         sys.exit(1)
     download_list = []
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         for line in f:
             line = line.strip()
-            if line and not line.startswith('#'):
-                parts = line.split(' ', 1)
+            if line and not line.startswith("#"):
+                parts = line.split(" ", 1)
                 if len(parts) == 2:
                     url, output_path = parts
                     download_list.append((url.strip(), output_path.strip()))
@@ -98,13 +112,14 @@ def read_download_list(file_path):
                     print(f"Invalid line in {file_path}: {line}")
     return download_list
 
+
 def upload_file_to_s3_if_not_exists(s3_client, file_path, bucket_name, s3_key):
     try:
         # Check if the object already exists
         s3_client.head_object(Bucket=bucket_name, Key=s3_key)
         print(f"File s3://{bucket_name}/{s3_key} already exists. Skipping upload.")
     except ClientError as e:
-        if e.response['Error']['Code'] == '404':
+        if e.response["Error"]["Code"] == "404":
             # Object does not exist, proceed to upload
             try:
                 s3_client.upload_file(file_path, bucket_name, s3_key)
@@ -118,7 +133,8 @@ def upload_file_to_s3_if_not_exists(s3_client, file_path, bucket_name, s3_key):
             print(e)
             sys.exit(1)
 
-def sync_directory_to_s3(s3_client, local_dir, bucket_name, s3_prefix=''):
+
+def sync_directory_to_s3(s3_client, local_dir, bucket_name, s3_prefix=""):
     for root, dirs, files in os.walk(local_dir):
         for file in files:
             local_path = os.path.join(root, file)
@@ -126,11 +142,12 @@ def sync_directory_to_s3(s3_client, local_dir, bucket_name, s3_prefix=''):
             s3_key = os.path.join(s3_prefix, relative_path).replace("\\", "/")
             upload_file_to_s3_if_not_exists(s3_client, local_path, bucket_name, s3_key)
 
+
 def main():
     suffix, region = get_unique_suffix()
     s3_bucket_name = f"comfyui-models-{suffix}"
 
-    s3_client = boto3.client('s3', region_name=region)
+    s3_client = boto3.client("s3", region_name=region)
     ensure_bucket_exists(s3_client, s3_bucket_name, region)
 
     os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
@@ -160,6 +177,7 @@ def main():
     # shutil.rmtree(LOCAL_MODEL_DIR)
 
     print(f"### Models have been uploaded to S3 bucket: s3://{s3_bucket_name}/")
+
 
 if __name__ == "__main__":
     main()
